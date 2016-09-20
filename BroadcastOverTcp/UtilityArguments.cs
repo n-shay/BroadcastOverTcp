@@ -1,7 +1,5 @@
 ﻿namespace BroadcastOverTcp
 {
-    using System;
-
     public class UtilityArguments : InputArguments
     {
         public ushort? Port => this.GetUnsignedInt16("p");

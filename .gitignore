@@ -2,6 +2,7 @@
 # This .gitignore file was automatically created by Microsoft(R) Visual Studio.
 ################################################################################
 
-/BroadcastOverTcp/bin/Debug
-/BroadcastOverTcp/obj/Debug
+/BroadcastOverTcp/bin
+/BroadcastOverTcp/obj
 /.vs
+*.user
