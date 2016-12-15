@@ -14,6 +14,8 @@
 
         public bool IncludeLineBreak => this.GetBoolean("i");
 
+        public string SslCertificateName => this.GetString("s");
+
         public UtilityArguments(string[] args)
             : base(args)
         {

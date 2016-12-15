@@ -4,7 +4,7 @@
     using System.IO;
     using System.Linq;
     using System.Net;
-    using System.Net.Sockets;
+    using System.Security.Cryptography.X509Certificates;
     using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
@@ -24,20 +24,23 @@
                 Console.WriteLine("Broadcast a text file over TCP, line by line with delay.");
                 Console.WriteLine();
                 Console.WriteLine("USAGE:");
-                Console.WriteLine("    broadcastOverTcp -f [file path] -p [tcp port] [-a [ip address] | ");
-                Console.WriteLine("                                                   -r |");
-                Console.WriteLine("                                                   -d [seconds] ]");
+                Console.WriteLine(@"    broadcastOverTcp -f ""\path\to\file.txt"" -p 80 [-a ""192.168.1.1"" | ");
+                Console.WriteLine(@"                                                    -r |");
+                Console.WriteLine(@"                                                    -d 10 |");
+                Console.WriteLine(@"                                                    -i |");
+                Console.WriteLine(@"                                                    -s ""certificate name"" ]");
                 Console.WriteLine();
                 Console.WriteLine("REQUIRED:");
-                Console.WriteLine("    -f [file path]        Path to text file (line separated by CR/LF)");
-                Console.WriteLine("    -p [tcp port]         TCP port of broadcast destination");
+                Console.WriteLine("    -f [file path]         Path to text file (line separated by CR/LF)");
+                Console.WriteLine("    -p [tcp port]          TCP port of broadcast destination");
 
                 Console.WriteLine();
                 Console.WriteLine("OPTIONAL:");
-                Console.WriteLine("    -a [ip address]       IP address (or host name) of broadcast destination (default=127.0.0.1)");
-                Console.WriteLine("    -r                    Start again immediated, when file broadcast is finished");
-                Console.WriteLine("    -d [seconds]          Number of seconds to wait between broadcast (default=2)");
-                Console.WriteLine("    -i                    Include line breaks (CR/LF) in broadcast");
+                Console.WriteLine("    -a [ip address]        IP address (or host name) of broadcast destination (default=127.0.0.1)");
+                Console.WriteLine("    -r                     Start again immediated, when file broadcast is finished");
+                Console.WriteLine("    -d [seconds]           Number of seconds to wait between broadcast (default=2)");
+                Console.WriteLine("    -i                     Include line breaks (CR/LF) in broadcast");
+                Console.WriteLine("    -s [certificate name]  Use SSL certificate for socket encryption");
                 Console.WriteLine();
                 Console.WriteLine("Press any key to exit...");
 
@@ -88,8 +91,7 @@
 
             // validate delay
             var delay = utilArgs.Delay ?? 2;
-
-
+            
             Console.WriteLine("Press 'Q' at any time to quit...");
             Console.WriteLine();
 
@@ -97,89 +99,85 @@
 
             var cancellationTokenSource = new CancellationTokenSource();
 
-            var task =
-                Task.Run(
-                    () => Broadcast(
-                        ipEndPoint,
-                        file,
-                        delay,
-                        utilArgs.Repeat,
-                        utilArgs.IncludeLineBreak,
-                        cancellationTokenSource.Token,
-                        ex =>
-                            {
-                                Console.WriteLine($"Error:      {ex.Message}");
-                                Console.WriteLine($"Details:    {ex.ToString()}");
+            X509Certificate2 cert = null;
+            if (!string.IsNullOrEmpty(utilArgs.SslCertificateName))
+                cert = GetCertificate(utilArgs.SslCertificateName);
 
-                                Thread.Sleep(5000);
-                                Environment.Exit(0);
-                            }));
-
-            // Listen for a key response.
-            ConsoleKeyInfo keyInfo;
-            do
+            using (var connection = new SocketConnection(ipEndPoint, cert))
             {
-                keyInfo = Console.ReadKey(true);
+                connection.Connected += (obj, e) =>
+                    {
+                        Console.WriteLine(
+                            $"[{DateTime.Now:s}] Connected: {((IPEndPoint) e.RemoteEndPoint).Address}:{((IPEndPoint) e.RemoteEndPoint).Port}");
+                    };
+                connection.Disconnecting += (obj, e) =>
+                    {
+                        Console.WriteLine($"[{DateTime.Now:s}] Disconnecting...");
+                    };
+                connection.DataSent += (obj, e) =>
+                    {
+                        Console.WriteLine(
+                            $"[{DateTime.Now:s}] Sent: {Encoding.ASCII.GetString(e.Data).TrimEnd('\r', '\n')} [{e.Data.Length} bytes]");
+                    };
+                connection.ConnectionError += (obj, e) =>
+                    {
+                        Console.WriteLine($"[{DateTime.Now:s}] Server unreachable ({e.InnerException.Message}).");
+                    };
+                connection.SendError += (obj, e) =>
+                    {
+                        Console.WriteLine($"[{DateTime.Now:s}] Send failed ({e.InnerException.Message}).");
+                    };
 
-                try
+                var task =
+                    Task.Run(
+                        () => Broadcast(
+                            connection,
+                            file,
+                            delay,
+                            utilArgs.Repeat,
+                            utilArgs.IncludeLineBreak,
+                            cancellationTokenSource.Token,
+                            ex =>
+                                {
+                                    Console.WriteLine($"Error:      {ex.Message}");
+                                    Console.WriteLine($"Details:    {ex.ToString()}");
+
+                                    Thread.Sleep(5000);
+                                    Environment.Exit(0);
+                                }));
+
+                // Listen for a key response.
+                ConsoleKeyInfo keyInfo;
+                do
                 {
-                    //switch (keyInfo.Key)
-                    //{
-                    //}
-                }
-                catch (Exception ex)
+                    keyInfo = Console.ReadKey(true);
+
+                    try
+                    {
+                        //switch (keyInfo.Key)
+                        //{
+                        //}
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error executing {keyInfo.Key}. Exception: {ex}");
+                    }
+                } while (keyInfo.Key != ConsoleKey.Q);
+
+                if (!task.IsCompleted)
                 {
-                    Console.WriteLine($"Error executing {keyInfo.Key}. Exception: {ex}");
+                    Console.WriteLine($"[{DateTime.Now:s}] Stopping...");
+                    cancellationTokenSource.Cancel();
+
+                    task.Wait(TimeSpan.FromSeconds(8));
                 }
-            } while (keyInfo.Key != ConsoleKey.Q);
-
-            if (!task.IsCompleted)
-            {
-                Console.WriteLine($"[{DateTime.Now:s}] Stopping...");
-                cancellationTokenSource.Cancel();
-
-                task.Wait(TimeSpan.FromSeconds(8));
             }
 
             Console.WriteLine($"[{DateTime.Now:s}] Goodbye!");
         }
-
-        private static bool IsConnected(Socket socket)
-        {
-            return !((socket.Poll(1000, SelectMode.SelectRead) && (socket.Available == 0)) || !socket.Connected);
-        }
-
-        private static bool TryConnect(ref Socket socket, IPEndPoint endPoint)
-        {
-            try
-            {
-                if(socket != null)
-                {
-                    if (IsConnected(socket))
-                        return true;
-                    
-                    socket.Close();
-
-                    socket = null;
-                }
-
-                if (socket == null)
-                    socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-
-                socket.Connect(endPoint);
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[{DateTime.Now:s}] Server unreachable ({ex.Message}).");
-            }
-
-            return false;
-        }
-
+        
         public static void Broadcast(
-            IPEndPoint endPoint,
+            SocketConnection connection,
             FileInfo file,
             uint delaySeconds,
             bool repeat,
@@ -187,12 +185,12 @@
             CancellationToken cancellationToken,
             Action<Exception> exceptionCallback)
         {
-            Socket socket = null;
             try
             {
+                
                 do
                 {
-                    while (!TryConnect(ref socket, endPoint))
+                    while (!connection.Connect())
                         Thread.Sleep(500);
 
                     Console.WriteLine($"[{DateTime.Now:s}] Starting file broadcast...");
@@ -210,12 +208,10 @@
 
                                     var data = Encoding.ASCII.GetBytes(lineToSend);
 
-                                    while (!TryConnect(ref socket, endPoint))
+                                    while (!connection.Connect())
                                         Thread.Sleep(500);
 
-                                    var count = socket.Send(data);
-
-                                    Console.WriteLine($"[{DateTime.Now:s}] Sent: {line} [{count} bytes]");
+                                    connection.Send(data);
                                 }
 
                                 if (cancellationToken.IsCancellationRequested)
@@ -234,18 +230,34 @@
 
                 } while (repeat);
 
-                if (!IsConnected(socket))
-                {
-                    Console.WriteLine($"[{DateTime.Now:s}] Disconnecting...");
-                    socket.Disconnect(false);
-                }
-
-                socket.Close();
+                connection.Disconnect();
             }
             catch (Exception ex)
             {
                 exceptionCallback(ex);
             }
         }
+
+        private static X509Certificate2 GetCertificate(string name)
+        {
+            if(string.IsNullOrEmpty(name))
+                throw new ArgumentNullException(nameof(name));
+
+            using (var store = new X509Store(StoreName.Root, StoreLocation.LocalMachine))
+            {
+                store.Open(OpenFlags.ReadOnly);
+
+                var collection = store.Certificates;
+                collection = collection.Find(X509FindType.FindByTimeValid, DateTime.Now, false);
+                collection = collection.Find(X509FindType.FindBySubjectDistinguishedName, name, false);
+
+                if (collection.Count > 0)
+                    return collection[0];
+                
+                throw new Exception($"Certificate '{name}' was not found in the certificate store (LocalMachine\\Root).");
+            }
+        }
+
+        
     }
 }
